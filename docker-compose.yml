@@ -1,0 +1,84 @@
+services:
+
+  # ── Redis ────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: intra_ai_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Backend API ──────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: intra_ai_backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - APP_ENV=development
+      - DEBUG=true
+      # Use the supplied Supabase project from backend/.env.
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=intra-ai-dev-secret-key-32-chars-long!
+      - API_BASE_URL=http://localhost:8000
+      - FRONTEND_URL=http://localhost:3000
+      # M1_PROVIDER and ORCHESTRATOR_PROVIDER come from backend/.env.
+      # Do not override the selected runtime model with a compose default.
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-gpt-oss:20b}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-https://ollama.com/v1}
+      - GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-20b}
+      - GROQ_BASE_URL=${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      - GROQ_TIMEOUT_SECONDS=${GROQ_TIMEOUT_SECONDS:-20.0}
+      - AGORA_ALEX_PROJECT_ID=${AGORA_ALEX_PROJECT_ID:-a71666df598e499992a0ee5499dc7dcf}
+      - AGORA_ALEX_PIPELINE_ID=${AGORA_ALEX_PIPELINE_ID:-6d40244417034eb4bdae42218f820a85}
+      - AGORA_JORDAN_PROJECT_ID=${AGORA_JORDAN_PROJECT_ID:-a71666df598e499992a0ee5499dc7dcf}
+      - AGORA_JORDAN_PIPELINE_ID=${AGORA_JORDAN_PIPELINE_ID:-682bbf59d8914e97a983e40a3dab895a}
+      - CUSTOM_LLM_URL=
+      - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY:-intra-ai-custom-llm-local}
+      - AGORA_CUSTOMER_ID=75652d1647bf40398535a86973d25d9b
+      - AGORA_CUSTOMER_SECRET=5a292d12cde347479321f69c77e7e95b
+      - AGORA_CUSTOM_LLM_PIPELINE_ID=
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/api/v1/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Frontend App ─────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=http://localhost:8000
+        - NEXT_PUBLIC_AGORA_APP_ID=a71666df598e499992a0ee5499dc7dcf
+        - NEXT_PUBLIC_APP_ENV=development
+    container_name: intra_ai_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis_data:

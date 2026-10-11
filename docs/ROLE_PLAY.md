@@ -1,0 +1,151 @@
+# Role Play — Architecture
+
+Status: agent selection and realtime voice implemented and code-reviewed; **not yet
+verified against live browser audio** (see "Verification status" below and
+`docs/GD_ROLEPLAY_ROOT_CAUSE_REPORT.md` for the empty-dropdown root cause).
+
+## 1. What Role Play actually is in this codebase
+
+Role Play is **persona/scenario-driven**, not agent-driven, at its core: an HR user
+creates a reusable `PersonaDefinition` (who the character is) and a `ScenarioDefinition`
+(the situation, phases, hidden information, success/failure signals), then assigns a
+scenario to a candidate. None of this changed. What changed is that a session now
+also has a **voice agent** — the AgentRegistry entry that actually gives the persona a
+voice on Agora — selected once and validated server-side.
+
+```
+HR creates/reuses a Persona + Scenario
+        │
+        ▼
+HR assigns a Scenario to a candidate, choosing a Voice agent from the
+real AgentRegistry (not hardcoded) ── see §2 for why this dropdown was empty
+        │
+        ▼
+roleplay_sessions row (status=assigned), state.agent_id pinned
+        │
+        ▼
+Candidate starts the simulation → status=active
+        │        │
+        │        └──► the pinned voice agent (role_play) dispatched into the
+        │             Agora RTC channel, with a system prompt built from the
+        │             actual persona identity + current phase (not a static profile)
+        ▼
+Candidate speaks; Agora transcribes; webhook → orchestrator/intelligence pipeline
+(unchanged) advances phases, tracks escalation, grounds evidence
+        │
+        ▼
+Scenario completes (orchestrator decision or explicit finish) → voice agent stopped
+        │
+        ▼
+Report generated from accumulated evidence (unchanged)
+```
+
+## 2. Root cause of the empty agent dropdown
+
+See `docs/GD_ROLEPLAY_ROOT_CAUSE_REPORT.md` Issue 2 for the full writeup. In short:
+there was no Role Play agent-listing endpoint at all, and even a naive one built by
+filtering the generic `/agents` registry endpoint would have returned **every**
+registered agent (Alex, Jordan, GD Moderator, Role Play) with no way to tell which
+are actually usable for Role Play — because no `AgentProfile` declared *any*
+capability/channel metadata. The fix: `AgentProfile.metadata["channels"]` is now an
+explicit opt-in tag (`"standard_interview"` / `"group_discussion"` / `"role_play"`),
+`AgentRegistry.list_agents_for_channel()` filters by it, and
+`GET /roleplay/agents` (backed by `RolePlayService.compatible_agents()`) exposes only
+what's actually compatible — today, just `role_play`, but a future second immersive
+persona voice would appear automatically without any registry or frontend change.
+
+## 3. Agent selection flow
+
+```
+Role Play UI (recruiter)
+        │  GET /roleplay/agents
+        ▼
+AgentRegistry.list_agents_for_channel("role_play")   ← real registry, not hardcoded
+        │
+        ▼
+Recruiter picks an agent_id (defaults to "role_play", the only one today)
+        │  POST /roleplay/sessions { scenario_id, candidate_id, agent_id }
+        ▼
+RolePlayService.create() re-validates agent_id server-side against the same
+registry filter -- a client cannot smuggle in an arbitrary/incompatible agent_id
+        │
+        ▼
+Persisted into RolePlayState.agent_id (session-scoped jsonb field)
+```
+
+The frontend (`role-play-page.tsx`) implements the required UI states explicitly:
+loading ("Loading agents..."), available (a real `<select>` populated from the API),
+empty ("No compatible voice agent is configured. The simulation will run as text
+only." — the session still works, just without voice), and failed ("Failed to load
+agents").
+
+## 4. Voice runtime: does the selection actually propagate?
+
+Yes — traced end to end, not just to the dropdown:
+
+```
+state.agent_id (persisted at session creation)
+        │
+        ▼
+RolePlayService.control(..., action="start")
+        │
+        ▼
+RolePlayService._start_voice_agent(): AgoraAgentService.start_interview_agent(
+    agent_id=state.agent_id, system_prompt_override=<persona+phase-specific prompt>)
+        │
+        ▼
+Existing "role_play" Agora Agent Studio pipeline (registered in app.agents.role_play,
+NOT duplicated) actually joins the channel with that dynamic prompt
+```
+
+The **dynamic system prompt** (`RolePlayService._system_prompt()`) is built from the
+actual persona snapshot pinned to this session (name, personality, communication
+style, allowed/restricted information) and the current phase brief/escalation —
+**not** the static `ROLE_PLAY_PROFILE.instructions` text alone, which would make
+every persona sound identical. `AgoraAgentService.start_interview_agent()` gained an
+optional `system_prompt_override` parameter for this (Alex/Jordan never pass it, so
+Standard Interview's behavior is byte-for-byte unchanged).
+
+**Known architectural limitation.** The live voice persona's actual spoken turns are
+generated by Agora's own managed LLM in real time (for latency); the backend's
+orchestrator/intelligence pipeline (phase advancement, escalation, evidence) analyzes
+the same transcript asynchronously as a parallel "shadow" process — this is the
+existing, correct separation (`Role Play Agent` = character, `Orchestrator` =
+progression, `M1/Intelligence` = evaluation; see §6 in `AGORA_INTEGRATION.md`), but
+it does mean the live agent's system prompt is fixed at session start and is not
+live-updated as the orchestrator's phase/escalation state changes mid-conversation.
+Not fixed in this pass — logged as a known gap.
+
+## 5. RTC credentials and speaker identity
+
+Role Play is a strict 1:1 channel (one candidate, one persona agent) — there is no
+multi-speaker attribution problem the way there is for Group Discussion.
+`RolePlayService.rtc_credentials()` issues a scoped Agora RTC+RTM token for the
+*assigned* candidate only (re-checked against `row["candidate_id"]`, never trusting a
+client-supplied identity). Voice turns arrive via `POST
+/roleplay/sessions/{id}/agora-webhook` (server-to-server, `Agora-Signature-V2`
+verified — see `AGORA_INTEGRATION.md`) and commit through a dedicated RPC,
+`append_roleplay_voice_turn` (`migrations/20260912_02_roleplay_voice.sql`) — not the
+actor-authenticated `commit_roleplay_event`, because a voice turn has no per-request
+user JWT and, unlike Group Discussion, there may not even be a `users` row for this
+candidate to resolve one from.
+
+## 6. Persistence and evaluation
+
+Unchanged: `roleplay_events`/evidence/report generation, the
+persona/orchestrator/evaluator separation
+(`app/role_play/response_generator.py`'s system prompt already explicitly said "Do
+not evaluate the candidate, reveal scoring rules..." before this pass), and the
+company-policy pinning in `RolePlayService._policy_context()`. Voice-originated turns
+flow through the exact same `_build_turn_event()` core as typed turns (refactored out
+of `turn()` so both paths share one implementation, not two divergent ones).
+
+## Verification status
+
+**Verified:** agent-registry filtering (unit tests), dynamic system prompt
+composition, dispatch/stop idempotency and autonomous-completion cleanup (unit +
+real-Postgres integration tests — see `tests/features/test_role_play.py`), RTC
+credential scoping, voice-turn ingestion and `turn_id` idempotency (real-Postgres),
+frontend `tsc`/production build. **NOT verified:** live voice conversation quality,
+end-to-end latency, and whether the live persona's tone actually matches the escalation
+level the orchestrator computes in real time (see the architectural limitation in §4).
