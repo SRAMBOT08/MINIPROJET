@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: intra-ai
+    runtime: docker
+    plan: free
+    region: oregon
+    healthCheckPath: /api/v1/health

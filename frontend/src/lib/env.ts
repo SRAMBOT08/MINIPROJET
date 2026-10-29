@@ -14,11 +14,25 @@ export interface EnvConfig {
   wsUrl?: string;
 }
 
-function normalizeUrl(url: string | undefined, defaultVal: string): string {
-  if (!url || typeof url !== "string" || url.trim() === "") {
-    return defaultVal;
+function resolveApiUrl(url: string | undefined): string {
+  if (url && typeof url === "string" && url.trim() !== "") {
+    return url.trim().replace(/\/+$/, "");
   }
-  return url.trim().replace(/\/+$/, "");
+  if (typeof window !== "undefined") {
+    return window.location.origin;
+  }
+  return process.env.API_BASE_URL || "http://127.0.0.1:8000";
+}
+
+function resolveWsUrl(url: string | undefined): string | undefined {
+  if (url && typeof url === "string" && url.trim() !== "") {
+    return url.trim().replace(/\/+$/, "");
+  }
+  if (typeof window !== "undefined") {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${proto}//${window.location.host}/ws`;
+  }
+  return undefined;
 }
 
 function resolveAppEnv(env: string | undefined): "development" | "staging" | "production" {
@@ -33,12 +47,12 @@ const rawAppEnv = process.env.NEXT_PUBLIC_APP_ENV;
 const rawWsUrl = process.env.NEXT_PUBLIC_WS_URL;
 
 export const env: EnvConfig = {
-  apiUrl: normalizeUrl(rawApiUrl, "http://localhost:8000"),
+  apiUrl: resolveApiUrl(rawApiUrl),
   agoraAppId: (rawAgoraAppId || "").trim(),
   appEnv: resolveAppEnv(rawAppEnv),
   isProd: resolveAppEnv(rawAppEnv) === "production",
   isDev: resolveAppEnv(rawAppEnv) === "development",
-  wsUrl: rawWsUrl ? normalizeUrl(rawWsUrl, "ws://localhost:8000/ws") : undefined,
+  wsUrl: resolveWsUrl(rawWsUrl),
 };
 
 // Defensive check in production browser console
