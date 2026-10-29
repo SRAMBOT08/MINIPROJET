@@ -1,0 +1,43 @@
+worker_processes 1;
+daemon off;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+    keepalive_timeout 65;
+
+    client_max_body_size 50M;
+
+    server {
+        listen ${PORT};
+
+        # Disable buffering for real-time SSE streaming (Custom LLM / voice events)
+        proxy_buffering off;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Backend FastAPI routes
+        location ~ ^/(api|v1|docs|openapi\.json|redoc) {
+            proxy_pass http://127.0.0.1:8000;
+            proxy_read_timeout 300s;
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 300s;
+        }
+
+        # Frontend Next.js routes
+        location / {
+            proxy_pass http://127.0.0.1:3000;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_read_timeout 300s;
+        }
+    }
+}

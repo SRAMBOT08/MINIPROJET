@@ -30,7 +30,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1
 
-# Install runtime dependencies: Node.js 20, Redis, curl, libpq5, bash, ca-certificates
+# Install runtime dependencies: Node.js 20, Redis, Nginx, gettext-base (envsubst), curl, libpq5, bash
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
@@ -38,6 +38,8 @@ RUN apt-get update && \
         gnupg \
         libpq5 \
         redis-server \
+        nginx \
+        gettext-base \
         bash && \
     mkdir -p /etc/apt/keyrings && \
     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
@@ -46,9 +48,6 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
-
-# Install Caddy static binary directly from caddy:2-alpine
-COPY --from=caddy:2-alpine /usr/bin/caddy /usr/local/bin/caddy
 
 # Install Python backend dependencies
 COPY --from=backend-builder /wheels /wheels
@@ -63,8 +62,8 @@ COPY --from=frontend-builder /app/frontend/public /app/frontend/standalone/publi
 COPY --from=frontend-builder /app/frontend/.next/standalone /app/frontend/standalone
 COPY --from=frontend-builder /app/frontend/.next/static /app/frontend/standalone/.next/static
 
-# Copy Caddyfile and startup script
-COPY Caddyfile /etc/caddy/Caddyfile
+# Copy Nginx template and startup script
+COPY nginx.conf.template /etc/nginx/nginx.conf.template
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
